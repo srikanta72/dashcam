@@ -1,0 +1,10 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Pipeline runtime state and logs
+qubo_pipeline/**/pipeline_state.json
+qubo_pipeline/**/pipeline.log
+
+# Local Google OAuth credentials and tokens
+qubo_pipeline/credentials/
