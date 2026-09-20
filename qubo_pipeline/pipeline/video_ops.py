@@ -62,6 +62,32 @@ def _validate_video(path):
         raise ValueError(f"{path.name}: {detail}") from exc
 
 
+def _quick_validate_video(path):
+    """Check container metadata and confirm that a video stream is present."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_type",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        details = (exc.stderr or "").strip().splitlines()
+        detail = details[-1] if details else "unreadable video metadata"
+        raise ValueError(f"{path.name}: {detail}") from exc
+    if result.stdout.strip() != "video":
+        raise ValueError(f"{path.name}: no video stream found")
+
+
+def _find_invalid_fragment(files):
+    for fragment in files:
+        try:
+            _validate_video(fragment)
+        except ValueError as exc:
+            return exc
+    return None
+
+
 def _split_if_needed(state, source, base_name):
     source = Path(source)
     max_seconds = MAX_OUTPUT_HOURS * 3600
@@ -140,12 +166,11 @@ def _upload_file(state, file_path, title, step_name):
     video_id = youtube_upload.upload_video(
         youtube, str(file_path), title, youtube_upload.DEFAULT_PRIVACY
     )
-    playlist_id = youtube_upload.get_or_create_playlist(
-        youtube, youtube_upload.DEFAULT_PLAYLIST_NAME
-    )
-    youtube_upload.add_video_to_playlist(
-        youtube, playlist_id, video_id, youtube_upload.DEFAULT_PLAYLIST_NAME
-    )
+    for playlist_name in youtube_upload.DEFAULT_PLAYLIST_NAMES:
+        playlist_id = youtube_upload.get_or_create_playlist(youtube, playlist_name)
+        youtube_upload.add_video_to_playlist(
+            youtube, playlist_id, video_id, playlist_name
+        )
     with _STATE_LOCK:
         state.setdefault("steps", {}).setdefault(step_name, {}).setdefault("uploaded", {})[key] = video_id
         _save(state)
@@ -223,16 +248,17 @@ def merge_all_cameras(state, selected=None):
             _log(state, f"MERGE_FAILED camera={folder_name} error={message}")
             raise FileNotFoundError(message)
 
-        _log(state, f"VALIDATE_START camera={folder_name} files={len(files)}")
+        _log(state, f"VALIDATE_START camera={folder_name} files={len(files)} mode=quick")
+        print(f"[INFO] Quick validation in progress for {folder_name} files...")
         for fragment in files:
             try:
-                _validate_video(fragment)
-                print(f"[VALID] {folder_name}/{fragment.name}")
+                _quick_validate_video(fragment)
             except ValueError as exc:
                 message = f"Invalid camera fragment; retained for inspection: {exc}"
                 _log(state, f"VALIDATE_FAILED camera={folder_name} file={fragment.name} error={exc}")
                 raise RuntimeError(message) from exc
-        _log(state, f"VALIDATE_DONE camera={folder_name}")
+        _log(state, f"VALIDATE_DONE camera={folder_name} mode=quick")
+        print(f"[OK] Quick validation completed for {folder_name}.")
 
         list_file = target / f"{folder_name}_concat.txt"
         try:
@@ -250,6 +276,9 @@ def merge_all_cameras(state, selected=None):
             try:
                 _validate_video(out_file)
             except ValueError as exc:
+                fragment_error = _find_invalid_fragment(files)
+                if fragment_error is not None:
+                    exc = fragment_error
                 _log(state, f"MERGE_OUTPUT_INVALID camera={folder_name} error={exc}")
                 raise RuntimeError(f"Merged output is invalid; fragments were retained: {exc}") from exc
             _mark_step(state, step_name, output=out_file.name, source_count=len(files))
@@ -285,12 +314,12 @@ def upload_step(state, which):
     if which == "cabin":
         source = target / "cabin_merged.mp4"
         base_name = "cabin_merged"
-        title = state.get("youtube_title") or target.name
+        title = f"{state.get('youtube_title') or target.name}-cabin"
         step_name = "upload_cabin"
     elif which == "frontrear":
         source = target / "front_rear_output.mp4"
         base_name = "front_rear_output"
-        title = target.name
+        title = f"{state.get('youtube_title') or target.name}-front-rear"
         step_name = "upload_frontrear"
     elif which == "main":
         source = target / "stacked_output.mp4"

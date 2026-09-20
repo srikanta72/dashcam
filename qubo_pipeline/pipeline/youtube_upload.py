@@ -50,7 +50,12 @@ TOKEN_FILE = os.path.join(CREDENTIALS_DIR, "token.json")
 # youtube.force-ssl covers upload + playlists.insert + playlistItems.insert.
 SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 DEFAULT_PLAYLIST_NAME = "Dashcam"
+# The normal pipeline uploads each video to every playlist in this tuple.
+# Keep DEFAULT_PLAYLIST_NAME for the standalone uploader's CLI compatibility.
+DEFAULT_PLAYLIST_NAMES = (DEFAULT_PLAYLIST_NAME,)
 DEFAULT_PRIVACY = "private"
+DEFAULT_PLAYLIST_PRIVACY = "private"
+DEFAULT_MADE_FOR_KIDS = False
 PRIVACY_OPTIONS = {"private", "public", "unlisted"}
 
 
@@ -149,7 +154,7 @@ def get_or_create_playlist(youtube, playlist_name):
             "description": "",
         },
         "status": {
-            "privacyStatus": "private",
+            "privacyStatus": DEFAULT_PLAYLIST_PRIVACY,
         },
     }
     try:
@@ -195,7 +200,7 @@ def upload_video(youtube, file_path, title, privacy):
         },
         "status": {
             "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": False,  # explicitly: NOT made for kids
+            "selfDeclaredMadeForKids": DEFAULT_MADE_FOR_KIDS,
         },
     }
 

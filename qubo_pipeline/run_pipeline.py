@@ -41,13 +41,82 @@ ADVANCED / SCRIPTED USE - optional flags skip the matching prompt(s):
 
 import argparse
 import sys
+import subprocess
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
 from pipeline import state as state_mod
 from pipeline import copy_step
 from pipeline import prompts
 from pipeline import video_ops
+
+
+class PipelineTiming:
+    def __init__(self):
+        self.started_at = time.perf_counter()
+        self.steps = []
+        self._lock = threading.Lock()
+
+    def run(self, name, operation):
+        started = time.perf_counter()
+        started_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[TIMING] START {name} at {started_text}")
+        try:
+            return operation()
+        finally:
+            ended = time.perf_counter()
+            ended_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            duration = ended - started
+            with self._lock:
+                self.steps.append({
+                    "name": name,
+                    "started": started_text,
+                    "ended": ended_text,
+                    "duration": duration,
+                })
+            print(f"[TIMING] END   {name} at {ended_text} ({_format_duration(duration)})")
+
+    def print_summary(self, state):
+        total_duration = time.perf_counter() - self.started_at
+        print("\n[SUMMARY] Pipeline timing")
+        for step in self.steps:
+            print(
+                f"  {step['name']}: {step['started']} -> {step['ended']} "
+                f"({_format_duration(step['duration'])})"
+            )
+        print(f"  Total wall-clock time: {_format_duration(total_duration)}")
+
+        output = Path(state.get("target", "")) / "stacked_output.mp4"
+        try:
+            video_duration = video_ops._duration_seconds(output)
+        except (FileNotFoundError, OSError, ValueError, RuntimeError,
+            subprocess.CalledProcessError):
+            video_duration = None
+        if video_duration is not None:
+            print(
+                f"  Video processed: {_format_duration(video_duration)} of video "
+                f"in {_format_duration(total_duration)} "
+                f"({_format_ratio(video_duration, total_duration)} video-seconds/wall-second)"
+            )
+
+
+def _format_duration(seconds):
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _format_ratio(video_seconds, wall_seconds):
+    if wall_seconds <= 0:
+        return "n/a"
+    return f"{video_seconds / wall_seconds:.2f}x"
 
 
 def cmd_copy(args):
@@ -112,22 +181,23 @@ def cmd_run(args):
 
     cabin_upload_error = []
     frontrear_upload_error = []
+    timing = PipelineTiming()
 
     def upload_cabin_in_background():
         try:
-            video_ops.upload_step(st, "cabin")
+            timing.run("upload_cabin", lambda: video_ops.upload_step(st, "cabin"))
         except Exception as exc:
             cabin_upload_error.append(exc)
 
     def upload_frontrear_in_background():
         try:
-            video_ops.upload_step(st, "frontrear")
+            timing.run("upload_frontrear", lambda: video_ops.upload_step(st, "frontrear"))
         except Exception as exc:
             frontrear_upload_error.append(exc)
 
     try:
-        copy_step.run(st)
-        video_ops.merge_all_cameras(st, selected={"cabin"})
+        timing.run("copy", lambda: copy_step.run(st))
+        timing.run("merge_cabin", lambda: video_ops.merge_all_cameras(st, selected={"cabin"}))
         cabin_upload = threading.Thread(
             target=upload_cabin_in_background,
             name="cabin-youtube-upload",
@@ -136,8 +206,9 @@ def cmd_run(args):
         print("[INFO] Cabin merge is ready; starting YouTube upload in background.")
         cabin_upload.start()
 
-        video_ops.merge_all_cameras(st, selected={"front", "rear"})
-        video_ops.create_front_rear_stack(st)
+        timing.run("merge_front", lambda: video_ops.merge_all_cameras(st, selected={"front"}))
+        timing.run("merge_rear", lambda: video_ops.merge_all_cameras(st, selected={"rear"}))
+        timing.run("stack_frontrear", lambda: video_ops.create_front_rear_stack(st))
         cabin_upload.join()
         if cabin_upload_error:
             raise cabin_upload_error[0]
@@ -148,11 +219,11 @@ def cmd_run(args):
             daemon=False,
         )
         frontrear_upload.start()
-        video_ops.create_main_stack(st)
+        timing.run("stack_main", lambda: video_ops.create_main_stack(st))
         frontrear_upload.join()
         if frontrear_upload_error:
             raise frontrear_upload_error[0]
-        video_ops.upload_step(st, "main")
+        timing.run("upload_main", lambda: video_ops.upload_step(st, "main"))
     except Exception as exc:
         state_mod.log_event(st, f"RUN_FAILED error={exc}")
         raise
@@ -165,6 +236,7 @@ def cmd_run(args):
         status = st.get("steps", {}).get(step_name, {}).get("completed", False)
         print(f"  {'DONE' if status else 'PENDING'}  {step_name}")
     state_mod.print_status_report(st)
+    timing.print_summary(st)
 
 
 def build_parser():
